@@ -16,9 +16,12 @@
 #define CRYING_SM_LEVEL_REG		0x00U
 
 
+display_t display;
+
 int main(void) {
 	// init
 	pynq_init();
+	display_init(&display);
 	switchbox_init();
 	iic_init(IIC0);
 
@@ -32,6 +35,10 @@ int main(void) {
 	uint32_t motor_amplitude =	0x414D5021UL;
 	uint32_t motor_frequency =	0x66726571UL;
 
+	displayFillScreen(&display, RGB_BLUE);
+	displayDrawPixel(&display, 50, 50, RGB_YELLOW);
+	displayDrawFillRect(&display, 10, 100, 110, 200, RGB_RED);
+	displayDrawCircle(&display, 60, 40, 15, RGB_RED);
 
 	// loop
 	for (;;) {
@@ -48,13 +55,13 @@ int main(void) {
 
 		printf("crying_sm: ");
 		for (uint8_t c = 0; c < 4; c++) {
-			printf("%c", ((char*)(&crying_level))[c]);
+			printf("%c", ((char*)(&crying_level))[3-c]);
 		}
 		printf("\n");
 
 		printf("heartbeat_sm: ");
 		for (uint8_t c = 0; c < 4; c++) {
-			printf("%c", ((char*)(&heart_rate))[c]);
+			printf("%c", ((char*)(&heart_rate))[3-c]);
 		}
 		printf("\n");
 
