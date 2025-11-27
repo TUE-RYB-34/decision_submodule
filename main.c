@@ -2,20 +2,18 @@
 // Created by marijn on 10/14/25.
 //
 #include <libpynq.h>
-#include <fontx.h>
 
-#define DECISION_SM_ADDR		0x50U
+#define DECISION_SM_ADDR               0x50U
 
-#define MOTOR_DRIVER_SM_ADDR			0x51U
-#define MOTOR_DRIVER_SM_AMPLITUDE_REG	0x00U
-#define MOTOR_DRIVER_SM_FREQUENCY_REG	0x01U
+#define MOTOR_DRIVER_SM_ADDR           0x51U
+#define MOTOR_DRIVER_SM_AMPLITUDE_REG  0x00U
+#define MOTOR_DRIVER_SM_FREQUENCY_REG  0x01U
 
-#define HEARTBEAT_SM_ADDR			0x52U
-#define HEARTBEAT_SM_HEARTRATE_REG	0x00U
+#define HEARTBEAT_SM_ADDR              0x52U
+#define HEARTBEAT_SM_HEARTRATE_REG     0x00U
 
-#define CRYING_SM_ADDR			0x53U
-#define CRYING_SM_LEVEL_REG		0x00U
-
+#define CRYING_SM_ADDR                 0x53U
+#define CRYING_SM_LEVEL_REG            0x00U
 
 display_t display;
 FontxFile fx;
@@ -52,89 +50,54 @@ void write_to_screen(uint32_t crying_level, uint32_t heart_rate, uint32_t motor_
     displayDrawString(&display, &fx, 10, y, (uint8_t *)frequency_string, RGB_GREEN);
 }
 
-
 int main(void) {
-	// init
-	pynq_init();
-  
-	InitFontx(&fx, "/home/student/libpynq-5EID0-2023-v0.3.0/fonts/ILGH24XB.FNT", "");
-  
+    // init
+    pynq_init();
+    switchbox_init();
+    iic_init(IIC0);
+
+    InitFontx(&fx, "../../fonts/ILGH24XB.FNT", "");
 	display_init(&display);
-	switchbox_init();
 
-	switchbox_set_pin(IO_AR12, SWB_IIC0_SCL);
-	switchbox_set_pin(IO_AR13, SWB_IIC0_SDA);
+    // pins
+    switchbox_set_pin(IO_AR_SCL, SWB_IIC0_SCL);
+    switchbox_set_pin(IO_AR_SDA, SWB_IIC0_SDA);
 
-	iic_init(IIC0);
-	iic_reset(IIC0);
+    // vars
+    uint32_t crying_level    = 0;
+    uint32_t heart_rate      = 0;
+    uint32_t motor_amplitude = 0;
+    uint32_t motor_frequency = 0;
 
-	// vars
-	uint32_t crying_level =		0;
-	uint32_t heart_rate =		0;
-	uint32_t motor_amplitude =	0;
-	uint32_t motor_frequency =	0;
+    // display setup
 
-	displayFillScreen(&display, RGB_BLACK);
-	
+    displayFillScreen(&display, RGB_BLACK);
 
-	// loop
-	for (;;) {
-		if (iic_read_register(
-			IIC0, CRYING_SM_ADDR,
-			CRYING_SM_LEVEL_REG,
-			(uint8_t*)&crying_level, 4
-		)) {
-			printf("Error reading crying_sm\n");
-		} else {
-			printf("crying_sm: ");
-			for (uint8_t c = 0; c < 4; c++) {
-				printf("%c", ((char*)(&crying_level))[3-c]);
-			}
-			printf("\n");
-		}
-		
-    
-		if (iic_read_register(
-			IIC0, HEARTBEAT_SM_ADDR,
-			HEARTBEAT_SM_HEARTRATE_REG,
-			(uint8_t*)&heart_rate, 4
-		)) {
-			printf("Error reading heartbeat_sm\n");
-		} else {
-			printf("heartbeat_sm: ");
-			for (uint8_t c = 0; c < 4; c++) {
-				printf("%c", ((char*)(&heart_rate))[3-c]);
-			}
-			printf("\n");
-		}
-		
+    // loop
+    for (;;) {
+        // read crying SM
 
-		
-		if (iic_write_register(
-			IIC0, MOTOR_DRIVER_SM_ADDR,
-			MOTOR_DRIVER_SM_AMPLITUDE_REG,
-			(uint8_t*)&motor_amplitude, 4
-		)) {
-			printf("Error writing motor amplitude\n");
-		}
-		
+        iic_read_register(
+            IIC0, CRYING_SM_ADDR,
+            CRYING_SM_LEVEL_REG,
+            (void*)&crying_level, 4
+        );
+        sleep_msec(1);
+        iic_read_register(
+            IIC0, HEARTBEAT_SM_ADDR,
+            HEARTBEAT_SM_HEARTRATE_REG,
+            (void*)&heart_rate, 4
+        );
+        
 
-		if (iic_write_register(
-			IIC0, MOTOR_DRIVER_SM_ADDR,
-			MOTOR_DRIVER_SM_FREQUENCY_REG,
-			(uint8_t*)&motor_frequency, 4
-		)) {
-			printf("Error writing motor frequency\n");
-		}
-		
+        write_to_screen(crying_level, heart_rate, motor_amplitude, motor_frequency);
+        sleep_msec(200);
+    }
 
-		write_to_screen(crying_level, heart_rate, motor_amplitude, motor_frequency);
-		sleep_msec(600);  
-	}
-
-
-	// return
-	iic_destroy(IIC0);
-	pynq_destroy();
-	return EXIT_SUCCESS;
+    // return
+    iic_destroy(IIC0);
+    pynq_destroy();
+    return EXIT_SUCCESS;
 }
+
+
