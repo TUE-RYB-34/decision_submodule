@@ -1,3 +1,6 @@
+//TODO 
+// MAKE HB AND CRYING ERROR DETECTION FOR STRESS CALC
+//CHECK CURVE OF CRYING ON BABY STRESS
 //
 // Created by marijn on 10/14/25.
 //
@@ -15,10 +18,25 @@
 #define CRYING_SM_ADDR                 0x53U
 #define CRYING_SM_LEVEL_REG            0x00U
 
+
+//THIS IS HARDCODED, TODO CHANGE SO IT IS EASIER TO ADJUST/VARIABLE
+#define CRYING_MAX_VALUE               50000
 display_t display;
 FontxFile fx;
 
-void write_to_screen(uint32_t crying_level, uint32_t heart_rate, uint32_t motor_amplitude, uint32_t motor_frequency)
+typedef struct {
+    int amp;
+    int freq;
+} pos;
+
+typedef struct {
+    int l;
+    int u;
+    int r;
+    int d;
+} around;
+
+void write_to_screen(uint32_t crying_level, uint32_t heart_rate, uint32_t motor_amplitude, uint32_t motor_frequency, uint32_t stress_level)
 {
     // Clear display
     displayFillScreen(&display, RGB_BLACK);
@@ -48,7 +66,84 @@ void write_to_screen(uint32_t crying_level, uint32_t heart_rate, uint32_t motor_
     char frequency_string[50];
     snprintf(frequency_string, sizeof(frequency_string), "motor freq: %lu", (unsigned long)motor_frequency);
     displayDrawString(&display, &fx, 10, y, (uint8_t *)frequency_string, RGB_GREEN);
+
+    // Stress level
+    y += line_height;
+    char stress_string[50];
+    snprintf(stress_string, sizeof(stress_string), "stress level: %lu", (unsigned long)stress_level);
+    displayDrawString(&display, &fx, 10, y, (uint8_t *)stress_string, RGB_GREEN);
 }
+
+
+uint32_t calc_stress(uint32_t crying_level, uint32_t heart_rate, uint32_t stress_level) 
+{
+    float crying_volume = (float)crying_level/CRYING_MAX_VALUE;
+    stress_level = heart_rate*0.5 - 20;
+    if(stress_level >= 50) 
+    {
+    } else 
+    {
+        uint32_t stress_level_c = (uint32_t)(crying_volume*100.0 + 25.0)/2.5;
+        stress_level =(uint32_t)(stress_level+stress_level_c)/2.0;
+        //stress_level = stress_level_c;
+    }
+    return stress_level;
+}
+
+around check_around(uint32_t stress_matrix[5][5], uint32_t motor_amplitude, uint32_t motor_frequency)
+{
+    around around_result;
+    if(((int32_t)motor_frequency-1-1)<0) //left
+    {
+        around_result.l = 1000;
+    } else 
+    {
+        around_result.l = stress_matrix[motor_frequency-1-1][motor_amplitude-1];
+    }
+    if((motor_frequency-1+1)>5) //right
+    {
+        around_result.r = 1000;
+    } else 
+    {
+        around_result.r = stress_matrix[motor_frequency-1+1][motor_amplitude-1];
+    }
+    if(((int32_t)motor_amplitude-1-1)<0) //up
+    {
+        around_result.u = 1000;
+    } else 
+    {
+        around_result.u = stress_matrix[motor_frequency-1][motor_amplitude-1-1];
+    }
+    if((motor_amplitude-1+1)>4) //down
+    {
+        around_result.d = 1000;
+    } else 
+    {
+        around_result.d = stress_matrix[motor_frequency-1][motor_amplitude-1+1];
+    }
+    return around_result;
+    
+}
+
+
+pos calc_next_pos(uint32_t stress_matrix[5][5], uint32_t stress_level, uint32_t motor_amplitude, uint32_t motor_frequency)
+{
+    pos next_pos;
+    next_pos.amp = 0;
+    next_pos.freq = 0;
+    around around_result = check_around(stress_matrix, motor_amplitude, motor_frequency);
+    
+    if(stress_level<= 10 && motor_amplitude == 1 && motor_frequency == 1) 
+    {
+        //yay
+    } else 
+    {
+        printf("%u", around_result.l);
+
+    }
+    return next_pos;
+}
+
 
 int main(void) {
     // init
@@ -64,10 +159,21 @@ int main(void) {
     switchbox_set_pin(IO_AR_SDA, SWB_IIC0_SDA);
 
     // vars
-    uint32_t crying_level    = 0;
-    uint32_t heart_rate      = 0;
-    uint32_t motor_amplitude = 0;
-    uint32_t motor_frequency = 0;
+    uint32_t crying_level    = 20000;
+    uint32_t heart_rate      = 80;
+    uint32_t motor_amplitude = 5;
+    uint32_t motor_frequency = 5;
+    uint32_t stress_level = 0;
+
+
+    uint32_t stress_matrix[5][5] = {0};
+
+    //set known f and a values:
+
+    stress_matrix[0][0] = 1;
+    stress_matrix[4][4] = 9;
+    
+    printf("%u", stress_matrix[0][0]);
 
     // display setup
 
@@ -76,7 +182,6 @@ int main(void) {
     // loop
     for (;;) {
         // read crying SM
-
         iic_read_register(
             IIC0, CRYING_SM_ADDR,
             CRYING_SM_LEVEL_REG,
@@ -89,9 +194,9 @@ int main(void) {
             (void*)&heart_rate, 4
         );
         
-
-        write_to_screen(crying_level, heart_rate, motor_amplitude, motor_frequency);
-        sleep_msec(200);
+        stress_level = calc_stress(crying_level, heart_rate, stress_level);
+        write_to_screen(crying_level, heart_rate, motor_amplitude, motor_frequency, stress_level);
+        sleep_msec(50);
     }
 
     // return
