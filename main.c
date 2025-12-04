@@ -30,10 +30,10 @@ typedef struct {
 } pos;
 
 typedef struct {
-    int l;
-    int u;
-    int r;
-    int d;
+    uint32_t l;
+    uint32_t u;
+    uint32_t r;
+    uint32_t d;
 } around;
 
 void write_to_screen(uint32_t crying_level, uint32_t heart_rate, uint32_t motor_amplitude, uint32_t motor_frequency, uint32_t stress_level)
@@ -125,21 +125,98 @@ around check_around(uint32_t stress_matrix[5][5], uint32_t motor_amplitude, uint
     
 }
 
+int find(pos pos_history[100], pos target)
+{
+    for(int i = 0; i < 100; i++)
+    {
+        if(pos_history[i].freq == target.freq && pos_history[i].amp == target.amp)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
 
-pos calc_next_pos(uint32_t stress_matrix[5][5], uint32_t stress_level, uint32_t motor_amplitude, uint32_t motor_frequency)
+int find_history_index(pos pos_history[100])
+{
+    for(int i = 0; i < 100; i++)
+    {
+        if(pos_history[i].freq == 0 && pos_history[i].amp == 0)
+        {
+            return i;
+        }
+    }
+
+    return 0;
+}
+
+
+pos calc_next_pos(uint32_t stress_matrix[5][5], uint32_t stress_level, uint32_t motor_amplitude, uint32_t motor_frequency, pos pos_history[100])
 {
     pos next_pos;
     next_pos.amp = 0;
     next_pos.freq = 0;
+    int x = motor_frequency;
+    int y = motor_amplitude;
     around around_result = check_around(stress_matrix, motor_amplitude, motor_frequency);
     
-    if(stress_level<= 10 && motor_amplitude == 1 && motor_frequency == 1) 
+    if(motor_amplitude == 1 && motor_frequency == 1) 
     {
-        //yay
+        return (pos){motor_frequency, motor_amplitude};
     } else 
     {
-        printf("%u", around_result.l);
-
+        //left
+        if(around_result.l != 1000)
+        {
+            pos target;
+            target.freq = x - 1;
+            target.amp = y;
+            if((!find(pos_history, target) || (target.freq == 1 && target.amp == 1)) && around_result.l < stress_level)
+            {
+                //commits this move to history
+                pos_history[find_history_index(pos_history)] = target;
+                return target;
+            }
+        }
+        //up
+        if(around_result.u != 1000)
+        {
+            pos target;
+            target.freq = x;
+            target.amp = y-1;
+            if((!find(pos_history, target) || (target.freq == 1 && target.amp == 1)) && around_result.u < stress_level)
+            {
+                //commits this move to history
+                pos_history[find_history_index(pos_history)] = target;
+                return target;
+            }
+        }
+        //right
+        if(around_result.r != 1000)
+        {
+            pos target;
+            target.freq = x+1;
+            target.amp = y;
+            if((!find(pos_history, target) || (target.freq == 1 && target.amp == 1)) && around_result.r < stress_level)
+            {
+                //commits this move to history
+                pos_history[find_history_index(pos_history)] = target;
+                return target;
+            }
+        }
+        //down
+        if(around_result.d != 1000)
+        {
+            pos target;
+            target.freq = x;
+            target.amp = y+1;
+            if((!find(pos_history, target) || (target.freq == 1 && target.amp == 1)) && around_result.d < stress_level)
+            {
+                //commits this move to history
+                pos_history[find_history_index(pos_history)] = target;
+                return target;
+            }
+        }
     }
     return next_pos;
 }
@@ -159,21 +236,25 @@ int main(void) {
     switchbox_set_pin(IO_AR_SDA, SWB_IIC0_SDA);
 
     // vars
-    uint32_t crying_level    = 20000;
+    uint32_t crying_level    = 0;
     uint32_t heart_rate      = 80;
     uint32_t motor_amplitude = 5;
     uint32_t motor_frequency = 5;
-    uint32_t stress_level = 0;
+    uint32_t stress_level = 100;
 
 
     uint32_t stress_matrix[5][5] = {0};
 
+
     //set known f and a values:
 
-    stress_matrix[0][0] = 1;
-    stress_matrix[4][4] = 9;
+    stress_matrix[0][0] = 10;
+    stress_matrix[4][4] = 100;
+
+    pos pos_history[100];
+    pos_history[0] = (pos){5,5};
     
-    printf("%u", stress_matrix[0][0]);
+    //printf("%u", stress_matrix[0][0]);
 
     // display setup
 
@@ -193,8 +274,29 @@ int main(void) {
             HEARTBEAT_SM_HEARTRATE_REG,
             (void*)&heart_rate, 4
         );
-        
+        // write motor amplitude
+        iic_write_register(
+            IIC0, MOTOR_DRIVER_SM_ADDR,
+            MOTOR_DRIVER_SM_AMPLITUDE_REG,
+            (void*)&motor_amplitude, 4
+        );
+        sleep_msec(1);
+
+        // write motor frequency
+        iic_write_register(
+            IIC0, MOTOR_DRIVER_SM_ADDR,
+            MOTOR_DRIVER_SM_FREQUENCY_REG,
+            (void*)&motor_frequency, 4
+        );
+
         stress_level = calc_stress(crying_level, heart_rate, stress_level);
+        stress_matrix[motor_frequency-1][motor_amplitude-1] = stress_level;
+        pos next_pos = calc_next_pos(stress_matrix, stress_level, motor_amplitude, motor_frequency, pos_history);
+        motor_frequency = next_pos.freq;
+        motor_amplitude = next_pos.amp;
+        printf("%d , %d stress in matrix %d. real stress %d\n", motor_frequency, motor_amplitude, stress_matrix[motor_frequency-1][motor_amplitude-1], stress_level);
+
+
         write_to_screen(crying_level, heart_rate, motor_amplitude, motor_frequency, stress_level);
         sleep_msec(50);
     }
@@ -204,5 +306,4 @@ int main(void) {
     pynq_destroy();
     return EXIT_SUCCESS;
 }
-
 
