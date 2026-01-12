@@ -569,23 +569,75 @@ int main(void) {
                     if((motor_frequency != 5 || motor_amplitude != 5) &&
                        (motor_frequency != prev_motor_frequency || motor_amplitude != prev_motor_amplitude))
                     {
-                        if(stress_level >= prev_stress_level)
+                        // Mark this direction as failed in the previous position
+                        // Determine which direction was taken from prev to current
+                        uint8_t failed_direction = 0;
+                        if(motor_frequency < prev_motor_frequency)  // Moved left
+                            failed_direction = 0x01;
+                        else if(motor_amplitude < prev_motor_amplitude)  // Moved up
+                            failed_direction = 0x02;
+                        else if(motor_frequency > prev_motor_frequency)  // Moved right
+                            failed_direction = 0x04;
+                        else if(motor_amplitude > prev_motor_amplitude)  // Moved down
+                            failed_direction = 0x08;
+
+                        if(stress_level > prev_stress_level)
                         {
-                            printf("WARNING: Stress did not decrease (was %d, now %d). Backtracking to (F%d, A%d).\n",
+                            // Stress INCREASED (but not panic) - backtrack to previous position
+                            printf("WARNING: Stress increased (was %d, now %d). Backtracking to (F%d, A%d).\n",
                                    prev_stress_level, stress_level, prev_motor_frequency, prev_motor_amplitude);
                             should_backtrack = 1;
-
-                            // Mark this direction as failed in the previous position
-                            // Determine which direction was taken from prev to current
-                            if(motor_frequency < prev_motor_frequency)  // Moved left
-                                failed_moves[prev_motor_frequency-1][prev_motor_amplitude-1] |= 0x01;
-                            else if(motor_amplitude < prev_motor_amplitude)  // Moved up
-                                failed_moves[prev_motor_frequency-1][prev_motor_amplitude-1] |= 0x02;
-                            else if(motor_frequency > prev_motor_frequency)  // Moved right
-                                failed_moves[prev_motor_frequency-1][prev_motor_amplitude-1] |= 0x04;
-                            else if(motor_amplitude > prev_motor_amplitude)  // Moved down
-                                failed_moves[prev_motor_frequency-1][prev_motor_amplitude-1] |= 0x08;
+                            failed_moves[prev_motor_frequency-1][prev_motor_amplitude-1] |= failed_direction;
                         }
+                        else if(stress_level == prev_stress_level)
+                        {
+                            // Stress STAYED SAME - return to previous position, wait 1 second, then move to next
+                            // This avoids diagonal movements and ensures physical motors move sequentially
+                            printf("INFO: Stress unchanged (stayed at %d). Returning to (F%d, A%d) then moving to next best position.\n",
+                                   stress_level, prev_motor_frequency, prev_motor_amplitude);
+
+                            // Mark direction as failed
+                            failed_moves[prev_motor_frequency-1][prev_motor_amplitude-1] |= failed_direction;
+
+                            // Step 1: Move motors back to previous position
+                            motor_frequency = prev_motor_frequency;
+                            motor_amplitude = prev_motor_amplitude;
+
+                            // Write motor positions to hardware
+                            iic_write_register(IIC0, MOTOR_DRIVER_SM_ADDR, MOTOR_DRIVER_SM_AMPLITUDE_REG,
+                                             (void*)&motor_amplitude, 4);
+                            sleep_msec(1);
+                            iic_write_register(IIC0, MOTOR_DRIVER_SM_ADDR, MOTOR_DRIVER_SM_FREQUENCY_REG,
+                                             (void*)&motor_frequency, 4);
+
+                            printf("SKIP: Returned to (F%d, A%d). Waiting 1 second for motors to settle...\n",
+                                   motor_frequency, motor_amplitude);
+
+                            // Step 2: Wait 1 second for motors to physically return to previous position
+                            write_to_screen(crying_level, heart_rate, motor_amplitude, motor_frequency, stress_level);
+                            sleep_msec(1000);  // 1 second wait
+
+                            // Step 3: Calculate next position from previous position (avoiding failed direction)
+                            pos skip_pos = calc_next_pos(stress_matrix, prev_stress_level, prev_motor_amplitude, prev_motor_frequency, failed_moves);
+
+                            // Step 4: Move to the new position
+                            motor_frequency = skip_pos.freq;
+                            motor_amplitude = skip_pos.amp;
+                            samples_at_position = 0;
+                            history_index = 0;
+                            converged = 0;
+                            for(int i = 0; i < CONVERGENCE_SAMPLES_START; i++)
+                                stress_history[i] = 0;
+
+                            printf("SKIP: Now moving to next best position (F%d, A%d).\n",
+                                   skip_pos.freq, skip_pos.amp);
+
+                            // Continue to next iteration to avoid duplicate position change below
+                            write_to_screen(crying_level, heart_rate, motor_amplitude, motor_frequency, stress_level);
+                            sleep_msec(50);
+                            continue;
+                        }
+                        // else: stress decreased - continue normally, no backtrack needed
                     }
                 }
             }
