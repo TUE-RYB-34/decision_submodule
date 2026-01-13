@@ -13,7 +13,7 @@
 #define CRYING_SM_LEVEL_REG            0x00U
 
 #define CRYING_MAX_VALUE_DEFAULT       50000
-#define HEART_RATE_MIN                 60
+#define HEART_RATE_MIN                 50
 #define HEART_RATE_MAX                 240
 #define UNVISITED_CELL                 255
 #define CONVERGENCE_SAMPLES            7
@@ -22,6 +22,8 @@
 #define PANIC_THRESHOLD                2
 #define HEARTBEAT_SAMPLES              5
 #define HEARTBEAT_TOLERANCE            10
+#define CRYING_DROP_THRESHOLD_PERCENT 60
+
 
 display_t display;
 FontxFile fx;
@@ -103,47 +105,14 @@ uint32_t average_heartbeat(uint32_t heartbeat_history[], int history_count)
     return sum / history_count;
 }
 
-uint32_t calc_stress(uint32_t crying_level, uint32_t heart_rate, uint32_t crying_at_k5, uint32_t crying_step_size, int use_crying)
+uint32_t calc_stress(uint32_t heart_rate)
 {
     uint32_t hr_stress = heart_rate * 0.5 - 20;
 
-    uint32_t continuous_stress = hr_stress;
+    if(hr_stress < 10) hr_stress = 10;
+    if(hr_stress > 100) hr_stress = 100;
 
-    if(use_crying && crying_step_size > 0)
-    {
-        uint32_t expected_crying_value;
-
-        if(hr_stress >= 50)
-        {
-            expected_crying_value = crying_at_k5;
-        }
-        else if(hr_stress >= 40)
-        {
-            expected_crying_value = crying_at_k5 - crying_step_size;
-        }
-        else if(hr_stress >= 30)
-        {
-            expected_crying_value = crying_at_k5 - (crying_step_size * 2);
-        }
-        else if(hr_stress >= 20)
-        {
-            expected_crying_value = crying_at_k5 - (crying_step_size * 3);
-        }
-        else
-        {
-            expected_crying_value = crying_at_k5 - (crying_step_size * 4);
-        }
-
-        if(crying_level > expected_crying_value + (crying_step_size / 2))
-        {
-            continuous_stress += 10;
-        }
-    }
-
-    if(continuous_stress < 10) continuous_stress = 10;
-    if(continuous_stress > 100) continuous_stress = 100;
-
-    uint32_t rounded_stress = continuous_stress + 5;
+    uint32_t rounded_stress = hr_stress + 5;
     uint32_t discrete_stress = ((rounded_stress - 10) / 10) + 1;
     if(discrete_stress > 9) discrete_stress = 9;
     if(discrete_stress < 1) discrete_stress = 1;
@@ -335,7 +304,7 @@ int check_convergence(uint32_t stress_history[], int history_count, uint32_t mot
 
 int detect_panic(uint32_t current_stress, uint32_t previous_stress)
 {
-    if(current_stress > previous_stress + 1)
+    if(current_stress >= previous_stress + PANIC_THRESHOLD)
     {
         printf("WARNING: Panic detected! Stress jumped from state %d to %d\n",
                previous_stress, current_stress);
@@ -378,7 +347,6 @@ int main(void) {
     int just_left_goal = 0;
 
     int test_mode = 0;
-    int use_crying_for_stress = 1;
     int skip_convergence_at_goal = 1;
     int use_crying_accel = 1;
 
@@ -389,12 +357,16 @@ int main(void) {
     int waiting_at_start_after_panic = 0;
 
     uint32_t crying_samples[CONVERGENCE_SAMPLES_START] = {0};
-    int crying_sample_index = 0;
+    int crying_sample_count = 0;
     uint32_t crying_at_k5 = 0;
     uint32_t crying_at_k4 = 0;
-    uint32_t crying_step_size = 0;
-    int crying_step_calibrated = 0;
-    int collecting_k4_samples = 0;
+    uint32_t crying_drop_k5_k4 = 0;
+    int crying_calibrated = 0;
+
+    uint32_t prev_crying_level = 0;
+    int prev_crying_valid = 0;
+    int crying_accel_triggered = 0;  
+
 
     uint32_t stress_matrix[5][5];
 
@@ -418,12 +390,16 @@ int main(void) {
                 stress_matrix[i][j] = UNVISITED_CELL;
     }
 
+    
     displayFillScreen(&display, RGB_BLACK);
 
     printf("=== Rock-Your-Baby Algorithm Starting ===\n");
     printf("Test mode: %s\n", test_mode ? "ENABLED" : "DISABLED");
-    printf("Crying for stress: %s\n", use_crying_for_stress ? "ENABLED" : "DISABLED");
+    printf("Stress calculation: Heart rate only (crying NOT used)\n");
     printf("Skip convergence at goal: %s\n", skip_convergence_at_goal ? "ENABLED" : "DISABLED");
+    printf("Crying acceleration: %s\n", use_crying_accel ? "ENABLED" : "DISABLED");
+    printf("  - Will calibrate from K5→K4 crying drop\n");
+    printf("  - Threshold: %d%% of measured drop\n", CRYING_DROP_THRESHOLD_PERCENT);
     printf("\n");
 
     for (;;) {
@@ -457,25 +433,58 @@ int main(void) {
                 continue;
             }
 
-            if(stress_level == 5 && crying_at_k5 == 0 && use_crying_for_stress)
+            if(crying_sample_count < CONVERGENCE_SAMPLES_START)
             {
-                crying_samples[crying_sample_index] = crying_level;
-                crying_sample_index++;
+                crying_samples[crying_sample_count] = crying_level;
+                crying_sample_count++;
             }
-            else if(stress_level == 4 && crying_at_k5 > 0 && !crying_step_calibrated && use_crying_for_stress)
+
+            if(prev_crying_valid && use_crying_accel && crying_calibrated && samples_at_position > 0 &&
+               !waiting_at_start_after_panic && !replaying_path)
             {
-                if(!collecting_k4_samples)
+                if(crying_level < prev_crying_level)
                 {
-                    collecting_k4_samples = 1;
-                    crying_sample_index = 0;
-                    printf("INFO: Starting to collect crying samples at stress state 4 for step calibration.\n");
+                    uint32_t crying_drop = prev_crying_level - crying_level;
+                    uint32_t accel_threshold = (crying_drop_k5_k4 * CRYING_DROP_THRESHOLD_PERCENT) / 100;
+                    int32_t threshold_diff = (int32_t)crying_drop - (int32_t)accel_threshold;
+
+                    printf("[CRYING ACCEL CHECK] Drop: %d (prev: %d, curr: %d) | Threshold: %d (%d%% of K5→K4 drop %d) | Diff: %+d\n",
+                           crying_drop, prev_crying_level, crying_level, accel_threshold,
+                           CRYING_DROP_THRESHOLD_PERCENT, crying_drop_k5_k4, threshold_diff);
+
+                    if(crying_drop >= accel_threshold)
+                    {
+                        printf("*** CRYING ACCELERATION TRIGGERED ***\n");
+                        printf("    Measured crying drop: %d (from %d to %d)\n",
+                            crying_drop, prev_crying_level, crying_level);
+                        printf("    Acceleration threshold: %d (%d%% of K5→K4 drop)\n",
+                            accel_threshold, CRYING_DROP_THRESHOLD_PERCENT);
+                        printf("    Calibrated K5→K4 drop: %d\n", crying_drop_k5_k4);
+                        printf("    Difference: %+d (exceeded by %d)\n", threshold_diff, threshold_diff);
+                        printf("    Skipping convergence wait - baby is calming rapidly!\n");
+
+                        converged = 1;
+                        crying_accel_triggered = 1;
+                    }
+                    else
+                    {
+                        printf("    -> Not enough to trigger acceleration (need %d more)\n", accel_threshold - crying_drop);
+                    }
                 }
-                crying_samples[crying_sample_index] = crying_level;
-                crying_sample_index++;
+                else if(crying_level > prev_crying_level)
+                {
+                    uint32_t crying_increase = crying_level - prev_crying_level;
+                    printf("[CRYING ACCEL CHECK] Crying INCREASED by %d (prev: %d, curr: %d)\n",
+                           crying_increase, prev_crying_level, crying_level);
+                }
+                else
+                {
+                    printf("[CRYING ACCEL CHECK] Crying unchanged at %d\n", crying_level);
+                }
             }
 
             previous_stress = stress_level;
-            stress_level = calc_stress(crying_level, heart_rate, crying_at_k5, crying_step_size, use_crying_for_stress);
+            stress_level = calc_stress(heart_rate);
 
             if(motor_frequency == 5 && motor_amplitude == 5)
             {
@@ -520,25 +529,39 @@ int main(void) {
                 for(int i = 0; i < CONVERGENCE_SAMPLES_START; i++)
                     stress_history[i] = 0;
 
-                crying_sample_index = 0;
-                crying_step_calibrated = 0;
-                collecting_k4_samples = 0;
+                crying_sample_count = 0;
+                crying_calibrated = 0;
                 for(int i = 0; i < CONVERGENCE_SAMPLES_START; i++)
                     crying_samples[i] = 0;
 
+                prev_crying_level = 0;
+                prev_crying_valid = 0;
+                crying_accel_triggered = 0;
                 waiting_at_start_after_panic = 1;
                 replaying_path = 0;
                 replay_index = 0;
-
                 printf("Path length before panic: %d positions. Waiting for convergence at (5,5) before replaying.\n", path_length);
                 continue;
             }
             else
             {
-                converged = check_convergence(stress_history, samples_at_position, motor_frequency, motor_amplitude);
+                if(!crying_accel_triggered)
+                {
+                    converged = check_convergence(stress_history, samples_at_position, motor_frequency, motor_amplitude);
+                }
+                int was_crying_accel = crying_accel_triggered; 
+                
                 if(converged)
                 {
-                    printf("Stress converged at State=%d/9. Recording and moving to next position.\n", stress_level);
+                    if(crying_accel_triggered)
+                    {
+                        printf("Moving to next position due to crying acceleration.\n");
+                        //crying_accel_triggered = 0;
+                    }
+                    else
+                    {
+                        printf("Stress converged at State=%d/9. Recording and moving to next position.\n", stress_level);
+                    }
 
                     if(waiting_at_start_after_panic)
                     {
@@ -548,43 +571,50 @@ int main(void) {
                         printf("Baby calmed at (5,5). Starting path replay to last good position.\n");
                     }
 
-                    if(stress_level == 5 && crying_at_k5 == 0 && use_crying_for_stress)
+                    if(crying_sample_count >= 2)
                     {
-                        if(crying_sample_index >= 2)
+                        uint32_t sample1 = crying_samples[crying_sample_count - 2];
+                        uint32_t sample2 = crying_samples[crying_sample_count - 1];
+                        uint32_t avg_crying = (sample1 + sample2) / 2;
+
+                        if(stress_level == 5 && crying_at_k5 == 0)
                         {
-                            uint32_t sum = crying_samples[crying_sample_index - 2] + crying_samples[crying_sample_index - 1];
-                            crying_at_k5 = sum / 2;
-                            crying_sample_index = 0;
-                            printf("CALIBRATION: Crying at K5 (stress state 5) = %d\n", crying_at_k5);
+                            crying_at_k5 = avg_crying;
+                            printf("=== CALIBRATION: K5 CRYING BASELINE ===\n");
+                            printf("    Converged at stress state 5/9\n");
+                            printf("    Last 2 samples: %d, %d\n", sample1, sample2);
+                            printf("    Average crying at K5 = %d\n", crying_at_k5);
                         }
-                    }
-                    else if(stress_level == 4 && crying_at_k5 > 0 && !crying_step_calibrated && use_crying_for_stress)
-                    {
-                        if(crying_sample_index >= 2)
+                        else if(stress_level == 4 && crying_at_k5 > 0 && !crying_calibrated)
                         {
-                            uint32_t sum = crying_samples[crying_sample_index - 2] + crying_samples[crying_sample_index - 1];
-                            crying_at_k4 = sum / 2;
+                            crying_at_k4 = avg_crying;
+
                             if(crying_at_k5 > crying_at_k4)
                             {
-                                crying_step_size = crying_at_k5 - crying_at_k4;
+                                crying_drop_k5_k4 = crying_at_k5 - crying_at_k4;
                             }
                             else
                             {
-                                crying_step_size = 1;
+                                crying_drop_k5_k4 = 1000;
+                                printf("WARNING: K4 crying >= K5 crying, using default drop = 1000\n");
                             }
-                            crying_step_calibrated = 1;
-                            printf("CALIBRATION: Crying at K4 (stress state 4) = %d\n", crying_at_k4);
-                            printf("CALIBRATION: Crying step size per stress state = %d\n", crying_step_size);
-                            printf("CALIBRATION: Expected crying values:\n");
-                            printf("  K5 (50-60%%): %d\n", crying_at_k5);
-                            printf("  K4 (40-50%%): %d\n", crying_at_k5 - crying_step_size);
-                            printf("  K3 (30-40%%): %d\n", crying_at_k5 - (crying_step_size * 2));
-                            printf("  K2 (20-30%%): %d\n", crying_at_k5 - (crying_step_size * 3));
-                            printf("  K1 (10-20%%): %d\n", crying_at_k5 - (crying_step_size * 4));
+
+                            crying_calibrated = 1;
+                            uint32_t accel_threshold = (crying_drop_k5_k4 * CRYING_DROP_THRESHOLD_PERCENT) / 100;
+
+                            printf("=== CALIBRATION: K5→K4 CRYING DROP MEASURED ===\n");
+                            printf("    Converged at stress state 4/9\n");
+                            printf("    Last 2 samples: %d, %d\n", sample1, sample2);
+                            printf("    Average crying at K5 = %d\n", crying_at_k5);
+                            printf("    Average crying at K4 = %d\n", crying_at_k4);
+                            printf("    Measured K5→K4 drop = %d\n", crying_drop_k5_k4);
+                            printf("    Acceleration threshold (%d%%) = %d\n",
+                                   CRYING_DROP_THRESHOLD_PERCENT, accel_threshold);
+                            printf("    Crying acceleration is now ENABLED\n");
                         }
                     }
 
-                    if((motor_frequency != 5 || motor_amplitude != 5) &&
+                    if(!was_crying_accel && (motor_frequency != 5 || motor_amplitude != 5) &&
                        (motor_frequency != prev_motor_frequency || motor_amplitude != prev_motor_amplitude))
                     {
                         uint8_t failed_direction = 0;
@@ -633,6 +663,7 @@ int main(void) {
                             samples_at_position = 0;
                             history_index = 0;
                             converged = 0;
+                            crying_sample_count = 0;
                             for(int i = 0; i < CONVERGENCE_SAMPLES_START; i++)
                                 stress_history[i] = 0;
 
@@ -644,6 +675,10 @@ int main(void) {
                             continue;
                         }
                     }
+                    else if(was_crying_accel)
+                    {
+                        printf("INFO: Crying acceleration triggered - trusting crying signal over heart rate. Not checking for stress increase.\n");
+                    }
                 }
             }
 
@@ -652,6 +687,7 @@ int main(void) {
 
         if((test_mode || converged || (replaying_path && motor_frequency == 5 && motor_amplitude == 5)) && !waiting_at_start_after_panic)
         {
+            
             pos next_pos;
             int is_backtracking = 0;
 
@@ -730,6 +766,7 @@ int main(void) {
                 samples_at_position = 0;
                 history_index = 0;
                 converged = 0;
+                crying_sample_count = 0;
                 for(int i = 0; i < CONVERGENCE_SAMPLES_START; i++)
                     stress_history[i] = 0;
 
@@ -769,14 +806,17 @@ int main(void) {
                     replay_index = 0;
                     waiting_at_start_after_panic = 0;
 
-                    crying_sample_index = 0;
+                    crying_sample_count = 0;
                     crying_at_k5 = 0;
                     crying_at_k4 = 0;
-                    crying_step_size = 0;
-                    crying_step_calibrated = 0;
-                    collecting_k4_samples = 0;
+                    crying_drop_k5_k4 = 0;
+                    crying_calibrated = 0;
                     for(int i = 0; i < CONVERGENCE_SAMPLES_START; i++)
                         crying_samples[i] = 0;
+
+                    prev_crying_level = 0;
+                    prev_crying_valid = 0;
+                    crying_accel_triggered = 0;
 
                     for(int i = 0; i < 5; i++)
                         for(int j = 0; j < 5; j++)
@@ -807,12 +847,11 @@ int main(void) {
                     replay_index = 0;
                     waiting_at_start_after_panic = 0;
 
-                    crying_sample_index = 0;
+                    crying_sample_count = 0;
                     crying_at_k5 = 0;
                     crying_at_k4 = 0;
-                    crying_step_size = 0;
-                    crying_step_calibrated = 0;
-                    collecting_k4_samples = 0;
+                    crying_drop_k5_k4 = 0;
+                    crying_calibrated = 0;
                     for(int i = 0; i < CONVERGENCE_SAMPLES_START; i++)
                         crying_samples[i] = 0;
 
@@ -828,6 +867,7 @@ int main(void) {
                     }
                 }
             }
+            crying_accel_triggered = 0;
         }
         else
         {
@@ -844,7 +884,8 @@ int main(void) {
                        samples_at_position, required_samples);
             }
         }
-
+        prev_crying_level = crying_level;
+        prev_crying_valid = 1;
         write_to_screen(crying_level, heart_rate, motor_amplitude, motor_frequency, stress_level);
         sleep_msec(50);
     }
